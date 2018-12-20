@@ -1,0 +1,205 @@
+# Import library
+
+library(raster)
+
+library(sp)
+
+library(rgeos)
+
+library(rgdal)
+
+# Import Sentinel-2 data
+
+LS<-list.files(pattern = "tif$",full.names = T)
+
+LS<-stack(LS)
+
+names(LS)<-c("Band1","Band2","Band3","Band4","Band5","Band6")
+
+# Remove NA data from Landsat 8
+
+NAvalue(LS)<-0
+
+# Plot a natural color image
+par(mar=rep(2,4))
+
+plotRGB(LS, r="Band4",g="Band3",b="Band2",stretch="hist",axes=T)
+
+# Import traning data
+
+train<-shapefile(file.choose()) # Import dataset called "LS_training'
+
+head(train)
+
+dim(train)
+
+# Randomly select a number of train data points
+
+train@data$CLASS_NAME<-as.factor(train@data$CLASS_NAME)
+
+levels(train@data$CLASS_NAME)
+
+# Set seed to make sure to have a consistant result
+
+set.seed(123)
+
+Agriculture<-train[sample(which(train@data$CLASS_NAME=="Agriculture"),4000),]
+
+Forest<-train[sample(which(train@data$CLASS_NAME=="Forest"),4000),]
+
+# Check the sum of `Mining` class
+length(which(train@data$CLASS_NAME=="Mining"))
+
+Mining<-train[sample(which(train@data$CLASS_NAME=="Mining"),4000),]
+
+Urban<-train[sample(which(train@data$CLASS_NAME=="Urban"),4000),]
+
+Water<-train[sample(which(train@data$CLASS_NAME=="Water"),4000),]
+
+# combining rows
+
+train<-rbind(Agriculture,Forest,Mining,Urban,Water)
+
+train<-data.frame(train)
+
+row.names(train)<-NULL
+
+head(train)
+
+dim(train)
+
+# To form a spatial point dataframe
+
+coordinates(train)<-~coords.x1+coords.x2
+
+proj4string(train)<-CRS("+proj=utm +zone=48 +datum=WGS84")
+
+train # check the structure of data
+
+dim(train@data) # check the number of row and column
+
+head(train@data)
+# Showing the distribution of training data points on the satellite map
+par(mar=rep(2,4))
+
+plot(train,add=T,col=as.numeric(train@data$CLASS_NAME), axes=T, main="Distribution of Training Data Points")
+
+# Extract the reference data points
+
+train_ext<-extract(LS, train,df=T)
+
+# Form a data frame 
+
+train_df<-data.frame(train@data,train_ext)
+
+# Check the train-df
+
+head(train_df)
+
+levels(train_df$CLASS_NAME) # Check the level of 'CLASS_NAME' 
+
+
+# Split data.frame into training and test sets
+
+library(caTools)
+
+split<-sample.split(train_df$CLASS_NAME, SplitRatio = 0.9)
+
+# training set
+
+training_set<-subset(train_df, split==T)
+
+test_set<-subset(train_df, split==F)
+
+dim(training_set)
+
+dim(test_set)
+
+# Building a random forest model on `training set`
+library(randomForest)
+
+rf_model<-randomForest(CLASS_NAME~Band1+Band2+Band3+Band4+Band4+Band5+Band6, data = training_set, ntree=500, importance=T,prox=T)
+
+# Predict land cover
+
+Sen_output<-predict(LS, rf_model, type="class", progress="window")
+
+plot(Sen_output)
+# Save this classified map
+
+writeRaster(Sen_output,filename = "LS_RF.tif")
+
+# Using test-set to predict land cover 
+
+LS_ped<-predict(rf_model,newdata=test_set[,-3],type="class")
+
+# making confusion matrix
+library(e1071)
+library(caret)
+
+cm1<-confusionMatrix(LS_ped,test_set$CLASS_NAME)
+
+cm1
+
+# Using actual ground control points
+
+shp<-shapefile(file.choose())
+
+crs(shp)
+
+df<-spTransform(shp, CRS("+proj=utm +zone=48 +datum=WGS84"))
+
+# Plot both Landsat Band1 and testing data
+plot(LS$Band1)
+
+plot(df,add=T)
+
+df_test<-data.frame(df)
+
+head(df_test)
+
+# Tidying test set 
+df_testing<-df_test %>% select(CLASS_NAME=Land_Cover,Band1=RASTERVALU,Band2=RASTERVA_1,
+                               Band3=RASTERVA_2,Band4=RASTERVA_3,Band5=RASTERVA_4,Band6=RASTERVA_5)
+
+##################### Done with testing preprocessing
+
+# Predicting land cover classes using ground control points
+
+LS_pred1<- predict(rf_model, newdata=df_testing[,-1],type="class")
+
+# making confusion matrix
+
+cm2<-confusionMatrix(LS_pred1,df_testing$CLASS_NAME)
+
+cm2
+###################################################################################
+# plot the effect of tree size 
+
+library(tidyverse)
+
+attributes(rf_model) # check all parameters of the model
+
+# Create a data.frame indicating the effect of tree size
+
+tree_size<-data.frame(rf_model$err.rate, Tree=1:nrow(rf_model$err.rate))
+
+head(tree_size)
+
+# Tidying this dataset
+
+tree_size <- tree_size %>% gather(Error_class, Error_value,-Tree)
+
+head(tree_size)
+
+dim(tree_size)
+
+# Plot the effect of tree
+
+ggplot(data=tree_size, aes(x=Tree, y=Error_value)) + geom_line(aes(color=Error_class)) + ylab(" Error Rate") + 
+  xlab("Number of Trees") + ggtitle("The effect of Trees on Model Error rate") + 
+  theme(plot.title = element_text(hjust=0.5)) +theme_bw()
+
+# Plot the importance variables
+
+varImpPlot(rf_model,type=2,main="Importance of Variables",pch=16)
